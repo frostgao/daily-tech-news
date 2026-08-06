@@ -23,6 +23,7 @@ from openai import OpenAI
 TAVILY_KEY = os.environ["TAVILY_API_KEY"]
 DEEPSEEK_KEY = os.environ["DEEPSEEK_API_KEY"]
 GMAIL_ADDR = os.environ["GMAIL_ADDRESS"]
+RECIPIENT = os.environ.get("RECIPIENT_EMAIL", os.environ["GMAIL_ADDRESS"])
 GMAIL_PASS = os.environ["GMAIL_APP_PASSWORD"]
 
 DEEPSEEK_MODEL = "deepseek-chat"
@@ -258,14 +259,14 @@ def send_email(md_text, start, end):
 
     msg = MIMEMultipart("alternative")
     msg["From"] = GMAIL_ADDR
-    msg["To"] = GMAIL_ADDR
+    msg["To"] = RECIPIENT
     msg["Subject"] = subj
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls()
         s.login(GMAIL_ADDR, GMAIL_PASS)
-        s.sendmail(GMAIL_ADDR, GMAIL_ADDR, msg.as_string())
+        s.sendmail(GMAIL_ADDR, RECIPIENT, msg.as_string())
     print("  ✓ 邮件已发送")
 
 def md_to_email_html(md):
