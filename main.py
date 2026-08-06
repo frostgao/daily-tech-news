@@ -31,11 +31,9 @@ DEEPSEEK_MODEL = "deepseek-chat"
 # ── 日期计算 ──────────────────────────────────────────────
 
 def get_date_range():
-    """确定覆盖日期：昨天，周一则覆盖上周六+周日"""
+    """确定覆盖日期：昨天"""
     today = date.today()
-    if today.weekday() == 0:
-        return today - timedelta(days=2), today - timedelta(days=1)
-    yesterday = today - timedelta(days=1)
+    yesterday = date.today() - timedelta(days=1)
     return yesterday, yesterday
 
 def fmt_date_range(start, end):
