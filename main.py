@@ -22,9 +22,9 @@ from openai import OpenAI
 # ── 环境变量 ──────────────────────────────────────────────
 TAVILY_KEY = os.environ["TAVILY_API_KEY"]
 DEEPSEEK_KEY = os.environ["DEEPSEEK_API_KEY"]
-GMAIL_ADDR = os.environ["GMAIL_ADDRESS"]
+GMAIL_ADDR = os.environ["GMAIL_ADDRESS"].strip()
 RECIPIENT = os.environ.get("RECIPIENT_EMAIL", os.environ["GMAIL_ADDRESS"])
-GMAIL_PASS = os.environ["GMAIL_APP_PASSWORD"]
+GMAIL_PASS = os.environ["GMAIL_APP_PASSWORD"].strip()
 
 DEEPSEEK_MODEL = "deepseek-chat"
 
