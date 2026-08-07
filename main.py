@@ -84,7 +84,7 @@ def round1(client, start, end):
     return results
 
 def round2(client, round1_results):
-    """第二轮：为 Top 新闻搜索 YouTube 视频"""
+    """第二轮：为 Top 新闻搜索 YouTube 视频 / 报道"""
     seen = set()
     queries = []
     for group in round1_results:
@@ -92,15 +92,17 @@ def round2(client, round1_results):
             t = r.get("title", "")
             if t and t not in seen:
                 seen.add(t)
-                # 取标题前 80 字作为搜索词
-                short = t[:80] if len(t) > 80 else t
+                short = t[:60] if len(t) > 60 else t
+                # 多种搜索变体，提高命中率
                 queries.append(f"{short} YouTube")
-                if len(queries) >= 12:
+                if len(queries) < 20:
+                    queries.append(f"{short} news analysis video")
+                if len(queries) >= 20:
                     break
-        if len(queries) >= 12:
+        if len(queries) >= 20:
             break
 
-    print(f"  发起 {len(queries)} 个 YouTube 搜索 ...")
+    print(f"  发起 {len(queries)} 个视频搜索 ...")
     results = []
     with ThreadPoolExecutor(max_workers=5) as ex:
         futs = {ex.submit(search_one, client, q): q for q in queries}
@@ -165,7 +167,7 @@ def build_prompt(round1_data, round2_data, start, end):
 ## 🔥 头条
 
 **1. 标题（12-25中文字符）**
-[正文75-150字：5W1H + 关键数字 + 影响]
+[正文120-200字：发生了什么 + 为什么重要 + 行业影响 + 关键数字]
 
 | 视频解读 | 来源 |
 |---|---|
@@ -200,14 +202,14 @@ def build_prompt(round1_data, round2_data, start, end):
 
 【规则】
 1. 共 10 条新闻（重大突发可增至 12 条），六大板块各至少 1 条，按 头条 → 大人物声音 → 模型产品 → 资本政策 → 硬件制造 → 快讯速览 顺序
-2. 头条放当天最重要的 1-2 条；快讯速览放值得记录但无需长篇展开的短消息
-3. 去重：同一事件的不同报道合并为一条
-4. 标题 12-25 中文字符；正文 75-150 字
+2. 头条放当天最重要的 1-2 条；快讯速览放值得记录但无需长篇展开的短消息（必须与前五板块不重复，若某新闻已在前五板块详述则跳过）
+3. 去重：同一事件的不同报道务必合并为一条；快讯速览中的新闻绝对不能与前面五个板块重复，已在前五板块详述的事件不要在快讯中再次出现
+4. 标题 12-25 中文字符；正文 120-200 字（包含发生了什么、为什么重要、行业影响）
 5. 财经数据保留美元原文并附人民币换算，汇率取 1 USD ≈ 7.2 CNY
 6. 英文专业术语首次出现标注原文，如：「高带宽存储器（HBM）」
 7. 中国大陆新闻客观中立，不夹带政治评判
 8. 不确定时标注「据X报道」
-9. 每条新闻尽量匹配 YouTube 视频（URL 必须是 youtube.com/watch?v= 格式）；若无合适视频，表格写「暂无相关视频报道」
+9. 每条新闻尽量匹配 1-2 个相关 YouTube 视频（URL 为 youtube.com/watch?v=，不强求完美匹配，相关解读即可）；若无合适视频，表格写「暂无相关视频报道」
 10. 不编造新闻；不重复使用同一 YouTube 链接
 11. 只输出日报 Markdown，不要任何额外说明"""
 
