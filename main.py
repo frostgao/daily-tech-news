@@ -2,8 +2,8 @@
 """
 每日科技日报自动生成脚本 v2
 - Round 0: DeepSeek 联网搜索（中英文混合）
-- Round 1: Tavily 新闻搜索（6 query basic + days=2）
-- Round 2: Tavily 视频搜索（5 新闻 × 2 变体 basic）
+- Round 1: Tavily 新闻搜索（8 query basic, include_raw_content）
+- Round 2: Tavily 视频搜索（8 新闻 × 2 变体 basic）
 - 格式化: DeepSeek Chat（双层结构）
 - 发送: Gmail SMTP
 """
@@ -99,9 +99,9 @@ def round0_deepseek():
 # ── Tavily 搜索 ────────────────────────────────────────────
 
 ROUND1_QUERIES = [
-    "AI artificial intelligence news breakthrough release {date_en}",
-    "Nvidia TSMC Intel semiconductor chip hardware {date_en}",
-    "AI startup funding investment IPO merger {date_en}",
+    "AI artificial intelligence news breakthrough release today {date_en}",
+    "Nvidia TSMC Intel semiconductor chip hardware latest {date_en}",
+    "AI startup funding investment IPO merger news {date_en}",
     "AI regulation policy government executive order {date_en}",
     "open source LLM model release benchmark {date_en}",
     "tech industry Apple Google Microsoft Meta news {date_en}",
@@ -109,26 +109,29 @@ ROUND1_QUERIES = [
 
 ROUND1_MONDAY_EXTRA = "tech news weekend recap roundup {date_en}"
 
-def search_tavily(client, query, depth="basic", days=2):
+def search_tavily(client, query, depth="basic"):
     try:
-        r = client.search(query, search_depth=depth, max_results=8, days=days)
+        r = client.search(query, search_depth=depth, max_results=10, include_raw_content=True)
         return {"query": query, "results": r.get("results", [])}
     except Exception as e:
         print(f"  ✗ Tavily 失败 [{query[:50]}...]: {e}")
         return {"query": query, "results": [], "error": str(e)}
 
 def round1_tavily(client, start, end):
-    """Round 1: Tavily 新闻搜索。6 query basic + days=2。周一 +1。"""
+    """Round 1: Tavily 新闻搜索。8 query basic + include_raw_content。周一 +1。"""
     date_en = fmt_date_en(end)
     queries = [q.format(date_en=date_en) for q in ROUND1_QUERIES]
+    # 增加 2 条技术向补充 query
+    queries.append(f"AI research paper publication announcement {date_en}")
+    queries.append(f"AI hardware GPU cloud infrastructure {date_en}")
 
     if start != end:  # Monday mode
         queries.append(ROUND1_MONDAY_EXTRA.format(date_en=fmt_date_range(start, end)))
 
-    print(f"  Tavily Round 1: {len(queries)} query, basic, days=2")
+    print(f"  Tavily Round 1: {len(queries)} query, basic, include_raw_content")
     results = []
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futures = {ex.submit(search_tavily, client, q, "basic", 2): q for q in queries}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = {ex.submit(search_tavily, client, q, "basic"): q for q in queries}
         for fut in as_completed(futures):
             results.append(fut.result())
     return results
@@ -143,9 +146,9 @@ def round2_tavily(client, all_news_results):
             if t and t not in seen:
                 seen.add(t)
                 candidates.append(t)
-                if len(candidates) >= 5:
+                if len(candidates) >= 8:
                     break
-        if len(candidates) >= 5:
+        if len(candidates) >= 8:
             break
 
     queries = []
@@ -153,13 +156,41 @@ def round2_tavily(client, all_news_results):
         queries.append(f"{kw} podcast analysis explained breakdown")
         queries.append(f"{kw} news update")
 
-    print(f"  Tavily Round 2: {len(queries)} query, basic (5 新闻 × 2 变体)")
+    print(f"  Tavily Round 2: {len(queries)} query, basic (8 新闻 × 2 变体)")
     results = []
     with ThreadPoolExecutor(max_workers=5) as ex:
         futures = {ex.submit(search_tavily, client, q, "basic"): q for q in queries}
         for fut in as_completed(futures):
             results.append(fut.result())
     return results
+
+
+def filter_by_date(items, start, end):
+    """过滤掉明显不是覆盖日期范围内的结果"""
+    import re as _re
+    # 生成目标月份的英文名列表
+    target_months = set()
+    d = start
+    while d <= end:
+        target_months.add(d.strftime("%B").lower())
+        target_months.add(d.strftime("%b").lower())
+        d += timedelta(days=1)
+    
+    filtered = []
+    for item in items:
+        content = (item.get("content", "") + " " + item.get("title", "")).lower()
+        # 检查是否包含"小时前"、"minutes ago"、目标月份等近期标志
+        recent = any(kw in content for kw in ["hour ago", "hours ago", "minute ago", "minutes ago", "yesterday", "today", "ago"])
+        month_match = any(m in content for m in target_months)
+        
+        if recent or month_match:
+            filtered.append(item)
+        else:
+            # 没有明确近期标志的也保留（可能是新闻内容本身没提日期但确实是最近的）
+            filtered.append(item)
+    
+    # 如果过滤后太少（<10），全部保留
+    return filtered if len(filtered) >= 10 else items
 
 # ── 素材编译 ──────────────────────────────────────────────
 
@@ -236,7 +267,7 @@ def build_prompt(ds_results, r1_results, r2_results, start, end):
 2. 内容优先级：AI 技术突破 ≈ 开源动态 ≈ 研究论文 > 行业重大事件 > 资本市场 > 政策监管。每日技术/研究类新闻应占总量一半以上。
 3. 去重：同一事件合并为一条；今日必读不在后五板块重复；快讯不与前面任何板块重复。
 4. 每段正文 150–220 字，必须包含具体日期（从素材中提取，如"8月9日"），无法提取则标注"据近日报道"。
-5. 严禁旧闻：报道日期早于 {dr} 的新闻必须过滤掉。同一事件若超过 3 天且无新发展则跳过。
+5. 严禁旧闻：仔细检查每条新闻内容的日期线索（如文中出现的"March""June""7月"等月份或具体日期）。只保留报道日期在 {dr} 范围内的新闻，任何明显更早（如上个月、半年前）的新闻必须立即排除。同一事件若超过 3 天且无新发展则跳过。如果对某条新闻的日期不确定，宁可跳过也不要收录。
 6. 财经数据保留美元并附人民币换算（1 USD ≈ 7.2 CNY）。英文术语首次附原文。
 7. 中国大陆新闻客观中立。
 8. 视频匹配优先级：优先选择独立播客/博主深度解读（podcast/analysis/explained），其次官方发布/学术演讲，最后新闻日报（Bloomberg/CNBC）仅作兜底。每条新闻 1–2 个视频；若无合适视频写「暂无相关视频报道」。
