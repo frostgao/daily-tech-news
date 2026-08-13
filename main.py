@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-每日科技日报自动生成脚本 v2
-- Round 0: DeepSeek 联网搜索（中英文混合）
-- Round 1: Tavily 新闻搜索（10 query basic, raw_content）
-- Round 2: Tavily 视频搜索（10 新闻 × 类型变体 basic）
+每日科技日报自动生成脚本 v3
+- Round 1: Tavily 新闻搜索（topic=news + days 原生日期过滤）
+- Round 2: Tavily 视频搜索（按新闻类型分路）
+- 数据层: 日期确定性过滤（published_date + 正文日期）
 - 格式化: DeepSeek Chat（双层结构）
 - 发送: Gmail SMTP
 """
@@ -35,104 +35,67 @@ def get_date_range():
         return today - timedelta(days=3), today - timedelta(days=1)
     return today - timedelta(days=1), today - timedelta(days=1)
 
-def fmt_date_range(start, end):
-    if start == end:
-        return start.strftime("%B %-d %Y")
-    return f"{start.strftime('%B %-d')} – {end.strftime('%B %-d')} {start.year}"
-
-def fmt_date_en(d):
-    return d.strftime("%B %-d %Y")
-
 def weekday_cn(d):
     return ["周一","周二","周三","周四","周五","周六","周日"][d.weekday()]
 
 def date_title_cn(d):
     return f"{d.year}年{d.month}月{d.day}日"
 
-# ── Round 0: DeepSeek 联网搜索 ────────────────────────────
-
-DS_QUERIES = [
-    "中文 AI 大模型 开源 技术突破 最新动态",
-    "China AI startup funding regulation latest",
-    "AI research paper breakthrough benchmark release",
-    "科技行业 芯片 半导体 供应链 最新新闻",
-    "AI agent multimodal reasoning open source framework",
-]
-
-def round0_deepseek():
-    """Round 0: DeepSeek 联网搜索，补中文源 + 技术论文。失败静默降级。"""
-    print("\n🧠 Round 0 · DeepSeek 联网搜索")
-    client = OpenAI(api_key=DEEPSEEK_KEY, base_url="https://api.deepseek.com")
-    all_results = []
-
-    for q in DS_QUERIES:
-        try:
-            resp = client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a web search assistant. Search the web and return results in JSON format with title, url, and content fields."},
-                    {"role": "user", "content": f"Search for: {q}\n\nReturn the top 10 results as a JSON array with fields: title, url, content."},
-                ],
-                temperature=0.1,
-                max_tokens=4096,
-            )
-            text = resp.choices[0].message.content or ""
-            # Try to parse JSON from response
-            try:
-                items = json.loads(text)
-                if isinstance(items, list):
-                    for item in items:
-                        item["query"] = q
-                    all_results.append({"query": q, "results": items})
-                    print(f"  ✓ DeepSeek: {q[:40]}... → {len(items)} 条")
-                else:
-                    raise ValueError("not a list")
-            except (json.JSONDecodeError, ValueError):
-                # Fallback: wrap as single result
-                all_results.append({"query": q, "results": [{"title": q, "url": "", "content": text[:2000]}]})
-                print(f"  ~ DeepSeek: {q[:40]}... → raw text ({len(text)} chars)")
-        except Exception as e:
-            print(f"  ✗ DeepSeek 失败 [{q[:40]}...]: {e}")
-            # Silently skip this query
-    return all_results
-
 # ── Tavily 搜索 ────────────────────────────────────────────
 
 ROUND1_QUERIES = [
-    "AI artificial intelligence news breakthrough release today {date_en}",
-    "Nvidia TSMC Intel semiconductor chip hardware latest {date_en}",
-    "AI startup funding investment IPO merger news {date_en}",
-    "AI regulation policy government executive order {date_en}",
-    "open source LLM model release benchmark {date_en}",
-    "tech industry Apple Google Microsoft Meta news {date_en}",
-    "AI safety research paper interpretability alignment {date_en}",
-    "China AI technology policy semiconductor news {date_en}",
+    "AI model release breakthrough OpenAI Google Anthropic",
+    "Nvidia TSMC Intel semiconductor chip hardware",
+    "open source LLM model benchmark release",
+    "AI startup funding IPO investment merger",
+    "AI regulation policy executive order",
+    "AI research paper safety alignment interpretability",
+    "tech industry Apple Google Microsoft Meta",
+    "中国 AI 大模型 开源 技术突破",
+    "芯片 半导体 供应链 最新动态",
+    "China AI technology policy regulation",
 ]
 
-ROUND1_MONDAY_EXTRA = "tech news weekend recap roundup {date_en}"
+ROUND1_MONDAY_EXTRA = "tech news weekend recap roundup"
 
-def search_tavily(client, query, depth="basic", raw_content=True):
+def search_tavily(client, query, depth="basic", raw_content=True, days=None, topic="news"):
+    params = {
+        "query": query,
+        "search_depth": depth,
+        "topic": topic,
+        "max_results": 10,
+        "include_raw_content": raw_content,
+    }
+    if days:
+        params["days"] = days
     try:
-        r = client.search(query, search_depth=depth, max_results=10, include_raw_content=raw_content)
+        r = client.search(**params)
         return {"query": query, "results": r.get("results", [])}
+    except TypeError as e:
+        # 旧版 SDK 可能不支持 days / topic 参数，逐级降级
+        print(f"  ! Tavily 参数降级 [{query[:40]}...]: {e}")
+        params.pop("days", None)
+        try:
+            r = client.search(**params)
+            return {"query": query, "results": r.get("results", [])}
+        except Exception as e2:
+            print(f"  ✗ Tavily 降级后仍失败 [{query[:40]}...]: {e2}")
+            return {"query": query, "results": [], "error": str(e2)}
     except Exception as e:
         print(f"  ✗ Tavily 失败 [{query[:50]}...]: {e}")
         return {"query": query, "results": [], "error": str(e)}
 
 def round1_tavily(client, start, end):
-    """Round 1: Tavily 新闻搜索。10 query basic + raw_content 开启（提取日期锚点）。"""
-    date_en = fmt_date_en(end)
-    queries = [q.format(date_en=date_en) for q in ROUND1_QUERIES]
-    queries.append(f"AI research paper publication announcement {date_en}")
-    queries.append(f"AI hardware GPU cloud infrastructure {date_en}")
-
+    """Round 1: Tavily 新闻搜索。topic=news + days 原生日期过滤。"""
+    queries = list(ROUND1_QUERIES)
     if start != end:  # Monday mode
-        queries.append(ROUND1_MONDAY_EXTRA.format(date_en=fmt_date_range(start, end)))
+        queries.append(ROUND1_MONDAY_EXTRA)
 
-    print(f"  Tavily Round 1: {len(queries)} query, basic, raw_content=True")
+    days = (end - start).days + 1
+    print(f"  Tavily Round 1: {len(queries)} query, topic=news, days={days}, raw_content=True")
     results = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(search_tavily, client, q, "basic", True): q for q in queries}
+        futures = {ex.submit(search_tavily, client, q, "basic", True, days, "news"): q for q in queries}
         for fut in as_completed(futures):
             results.append(fut.result())
     return results
@@ -174,38 +137,69 @@ def round2_tavily(client, all_news_results):
     print(f"  Tavily Round 2: {len(queries)} query, basic (10 新闻 × 2 变体, raw_content=False)")
     results = []
     with ThreadPoolExecutor(max_workers=5) as ex:
-        futures = {ex.submit(search_tavily, client, q, "basic", False): q for q in queries}
+        futures = {ex.submit(search_tavily, client, q, "basic", False, None, "general"): q for q in queries}
         for fut in as_completed(futures):
             results.append(fut.result())
     return results
 
 
+MONTH_EN = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+EN_DATE = re.compile(
+    r"\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)"
+    r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?",
+    re.IGNORECASE,
+)
+CN_DATE = re.compile(r"(?:(\d{4})年)?\s*(\d{1,2})月\s*(\d{1,2})日?")
+
+def extract_explicit_date(text, default_year):
+    """从文本中提取明确日期；找不到返回 None。"""
+    for m in EN_DATE.finditer(text or ""):
+        month = MONTH_EN.get(m.group(1).lower())
+        day = int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else default_year
+        try:
+            return date(year, month, day)
+        except ValueError:
+            continue
+    for m in CN_DATE.finditer(text or ""):
+        year = int(m.group(1)) if m.group(1) else default_year
+        try:
+            return date(year, int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+    return None
+
 def filter_by_date(items, start, end):
-    """过滤掉明显不是覆盖日期范围内的结果"""
-    import re as _re
-    # 生成目标月份的英文名列表
-    target_months = set()
-    d = start
-    while d <= end:
-        target_months.add(d.strftime("%B").lower())
-        target_months.add(d.strftime("%b").lower())
-        d += timedelta(days=1)
-    
-    filtered = []
+    """确定性日期过滤：优先用 Tavily published_date，否则从文本提取明确日期。"""
+    kept, dropped = [], 0
     for item in items:
-        content = (item.get("content", "") + " " + item.get("title", "")).lower()
-        # 检查是否包含"小时前"、"minutes ago"、目标月份等近期标志
-        recent = any(kw in content for kw in ["hour ago", "hours ago", "minute ago", "minutes ago", "yesterday", "today", "ago"])
-        month_match = any(m in content for m in target_months)
-        
-        if recent or month_match:
-            filtered.append(item)
-        else:
-            # 没有明确近期标志的也保留（可能是新闻内容本身没提日期但确实是最近的）
-            filtered.append(item)
-    
-    # 如果过滤后太少（<10），全部保留
-    return filtered if len(filtered) >= 10 else items
+        pub = item.get("published", "")
+        if pub:
+            try:
+                pub_date = date.fromisoformat(str(pub)[:10])
+            except ValueError:
+                pub_date = None
+            if pub_date and pub_date < start:
+                dropped += 1
+                continue
+            if pub_date:
+                kept.append(item)
+                continue
+
+        # published_date 缺失时，用标题和正文前段提取日期
+        text = f"{item.get('title', '')} {item.get('content', '')[:600]}"
+        found = extract_explicit_date(text, end.year)
+        if found and found < start:
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
 
 # ── 素材编译 ──────────────────────────────────────────────
 
@@ -217,13 +211,14 @@ def compile_items(all_results):
                 "title": r.get("title", ""),
                 "url": r.get("url", ""),
                 "content": r.get("content", ""),
+                "published": r.get("published_date", ""),
             })
     return items
 
 # ── DeepSeek 格式化 Prompt ─────────────────────────────────
 
-def build_prompt(ds_results, r1_results, r2_results, start, end):
-    all_items = compile_items(ds_results + r1_results)
+def build_prompt(r1_items, r2_results, start, end):
+    all_items = r1_items
     yt_items = compile_items(r2_results)
 
     news_json = json.dumps(all_items, ensure_ascii=False, indent=2)
@@ -286,10 +281,10 @@ def build_prompt(ds_results, r1_results, r2_results, start, end):
 6. 财经数据保留美元并附人民币换算（1 USD ≈ 7.2 CNY）。英文术语首次附原文。
 7. 中国大陆新闻客观中立。
 8. 视频匹配优先级：优先选择独立播客/博主深度解读（podcast/analysis/explained），其次官方发布/学术演讲，最后新闻日报（Bloomberg/CNBC）仅作兜底。每条新闻 1–2 个视频；若无合适视频写「暂无相关视频报道」。尽量为不同新闻匹配不同频道的视频，避免多条新闻都引用同一个短视频。
-9. 搜索素材（Round 0 + Round 1）中可能含有 YouTube 链接，请逐一检查并优先匹配到对应新闻。
+9. 搜索素材中可能含有 YouTube 链接，请逐一检查并优先匹配到对应新闻。
 10. 不编造新闻、不重复 YouTube 链接、不确定时标注"据X报道"。只输出日报 Markdown，不要额外说明。"""
 
-    user = f"""【新闻素材（Round 0 DeepSeek + Round 1 Tavily）】
+    user = f"""【新闻素材（Tavily，已按日期过滤）】
 {news_json}
 
 【视频素材（Round 2 Tavily）】
@@ -374,7 +369,7 @@ def md_to_email_html(md):
 
 def main():
     print("=" * 55)
-    print("  每日科技日报 · 自动生成 v2")
+    print("  每日科技日报 · 自动生成 v3")
     print("=" * 55)
 
     start, end = get_date_range()
@@ -382,27 +377,26 @@ def main():
     monday = start != end
     print(f"\n📅 覆盖: {dr}  ({weekday_cn(start)}){' [周一三合一]' if monday else ''}")
 
-    # Round 0: DeepSeek
-    ds_results = round0_deepseek()
-    ds_count = sum(len(g.get("results", [])) for g in ds_results)
-    print(f"  DeepSeek 共 {ds_count} 条")
-
     # Round 1: Tavily
     print("\n🔍 Round 1 · Tavily 新闻")
     tav = TavilyClient(api_key=TAVILY_KEY)
     r1 = round1_tavily(tav, start, end)
-    r1_count = sum(len(g.get("results", [])) for g in r1)
-    print(f"  Tavily R1 共 {r1_count} 条")
+    r1_items = compile_items(r1)
+    print(f"  Tavily R1 共 {len(r1_items)} 条")
+
+    print("\n🧹 日期过滤 ...")
+    r1_items, dropped = filter_by_date(r1_items, start, end)
+    print(f"  保留 {len(r1_items)} 条，丢弃 {dropped} 条旧闻")
 
     # Round 2: Tavily 视频
     print("\n🎬 Round 2 · Tavily 视频")
-    r2 = round2_tavily(tav, ds_results + r1)
+    r2 = round2_tavily(tav, [{"results": r1_items}])
     r2_count = sum(len(g.get("results", [])) for g in r2)
     print(f"  Tavily R2 共 {r2_count} 条")
 
     # Format
     print("\n🤖 DeepSeek 格式化 ...")
-    sys_p, usr_p = build_prompt(ds_results, r1, r2, start, end)
+    sys_p, usr_p = build_prompt(r1_items, r2, start, end)
     report = call_deepseek(sys_p, usr_p)
     print(f"  日报 {len(report)} 字符")
 
