@@ -2,8 +2,8 @@
 """
 每日科技日报自动生成脚本 v2
 - Round 0: DeepSeek 联网搜索（中英文混合）
-- Round 1: Tavily 新闻搜索（8 query basic, include_raw_content）
-- Round 2: Tavily 视频搜索（8 新闻 × 2 变体 basic）
+- Round 1: Tavily 新闻搜索（10 query basic, raw_content）
+- Round 2: Tavily 视频搜索（10 新闻 × 类型变体 basic）
 - 格式化: DeepSeek Chat（双层结构）
 - 发送: Gmail SMTP
 """
@@ -105,40 +105,54 @@ ROUND1_QUERIES = [
     "AI regulation policy government executive order {date_en}",
     "open source LLM model release benchmark {date_en}",
     "tech industry Apple Google Microsoft Meta news {date_en}",
+    "AI safety research paper interpretability alignment {date_en}",
+    "China AI technology policy semiconductor news {date_en}",
 ]
 
 ROUND1_MONDAY_EXTRA = "tech news weekend recap roundup {date_en}"
 
-def search_tavily(client, query, depth="basic"):
+def search_tavily(client, query, depth="basic", raw_content=True):
     try:
-        r = client.search(query, search_depth=depth, max_results=10, include_raw_content=True)
+        r = client.search(query, search_depth=depth, max_results=10, include_raw_content=raw_content)
         return {"query": query, "results": r.get("results", [])}
     except Exception as e:
         print(f"  ✗ Tavily 失败 [{query[:50]}...]: {e}")
         return {"query": query, "results": [], "error": str(e)}
 
 def round1_tavily(client, start, end):
-    """Round 1: Tavily 新闻搜索。8 query basic + include_raw_content。周一 +1。"""
+    """Round 1: Tavily 新闻搜索。10 query basic + raw_content 开启（提取日期锚点）。"""
     date_en = fmt_date_en(end)
     queries = [q.format(date_en=date_en) for q in ROUND1_QUERIES]
-    # 增加 2 条技术向补充 query
     queries.append(f"AI research paper publication announcement {date_en}")
     queries.append(f"AI hardware GPU cloud infrastructure {date_en}")
 
     if start != end:  # Monday mode
         queries.append(ROUND1_MONDAY_EXTRA.format(date_en=fmt_date_range(start, end)))
 
-    print(f"  Tavily Round 1: {len(queries)} query, basic, include_raw_content")
+    print(f"  Tavily Round 1: {len(queries)} query, basic, raw_content=True")
     results = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(search_tavily, client, q, "basic"): q for q in queries}
+        futures = {ex.submit(search_tavily, client, q, "basic", True): q for q in queries}
         for fut in as_completed(futures):
             results.append(fut.result())
     return results
 
+TECH_KW = ["model", "ai", "llm", "open source", "research", "chip", "semiconductor", "hardware", "gpu", "release", "launch", "benchmark"]
+CAPITAL_KW = ["funding", "ipo", "investment", "acquisition", "merger", "valuation", "raises", "stock", "billion", "million"]
+POLICY_KW = ["regulation", "policy", "government", "executive order", "law", "ban", "antitrust", "senate", "congress", "china"]
+
+def classify_variant(title):
+    t = title.lower()
+    if any(k in t for k in TECH_KW):
+        return "explained breakdown"
+    if any(k in t for k in CAPITAL_KW):
+        return "analysis impact"
+    if any(k in t for k in POLICY_KW):
+        return "explainer reaction"
+    return "analysis"
+
 def round2_tavily(client, all_news_results):
-    """Round 2: 从合并素材中提取 Top 5 新闻关键词，每条搜双变体，共 10 query basic。"""
-    # Collect candidate titles from all previous rounds
+    """Round 2: 提取 Top 10 新闻关键词，按类型分路搜视频，raw_content 关闭。"""
     seen, candidates = set(), []
     for group in all_news_results:
         for r in group.get("results", []):
@@ -146,20 +160,21 @@ def round2_tavily(client, all_news_results):
             if t and t not in seen:
                 seen.add(t)
                 candidates.append(t)
-                if len(candidates) >= 8:
+                if len(candidates) >= 10:
                     break
-        if len(candidates) >= 8:
+        if len(candidates) >= 10:
             break
 
     queries = []
     for kw in candidates:
-        queries.append(f"{kw} podcast analysis explained breakdown")
-        queries.append(f"{kw} news update")
+        variant = classify_variant(kw)
+        queries.append(f"{kw} {variant}")
+        queries.append(f"{kw} news")
 
-    print(f"  Tavily Round 2: {len(queries)} query, basic (8 新闻 × 2 变体)")
+    print(f"  Tavily Round 2: {len(queries)} query, basic (10 新闻 × 2 变体, raw_content=False)")
     results = []
     with ThreadPoolExecutor(max_workers=5) as ex:
-        futures = {ex.submit(search_tavily, client, q, "basic"): q for q in queries}
+        futures = {ex.submit(search_tavily, client, q, "basic", False): q for q in queries}
         for fut in as_completed(futures):
             results.append(fut.result())
     return results
@@ -270,7 +285,7 @@ def build_prompt(ds_results, r1_results, r2_results, start, end):
 5. 严禁旧闻：仔细检查每条新闻内容的日期线索（如文中出现的"March""June""7月"等月份或具体日期）。只保留报道日期在 {dr} 范围内的新闻，任何明显更早（如上个月、半年前）的新闻必须立即排除。同一事件若超过 3 天且无新发展则跳过。如果对某条新闻的日期不确定，宁可跳过也不要收录。
 6. 财经数据保留美元并附人民币换算（1 USD ≈ 7.2 CNY）。英文术语首次附原文。
 7. 中国大陆新闻客观中立。
-8. 视频匹配优先级：优先选择独立播客/博主深度解读（podcast/analysis/explained），其次官方发布/学术演讲，最后新闻日报（Bloomberg/CNBC）仅作兜底。每条新闻 1–2 个视频；若无合适视频写「暂无相关视频报道」。
+8. 视频匹配优先级：优先选择独立播客/博主深度解读（podcast/analysis/explained），其次官方发布/学术演讲，最后新闻日报（Bloomberg/CNBC）仅作兜底。每条新闻 1–2 个视频；若无合适视频写「暂无相关视频报道」。尽量为不同新闻匹配不同频道的视频，避免多条新闻都引用同一个短视频。
 9. 搜索素材（Round 0 + Round 1）中可能含有 YouTube 链接，请逐一检查并优先匹配到对应新闻。
 10. 不编造新闻、不重复 YouTube 链接、不确定时标注"据X报道"。只输出日报 Markdown，不要额外说明。"""
 
