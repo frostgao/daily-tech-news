@@ -215,11 +215,40 @@ def compile_items(all_results):
             })
     return items
 
+YOUTUBE_ID_RE = re.compile(r"[?&]v=([A-Za-z0-9_-]{11})")
+
+def video_id(url):
+    """从 YouTube URL 中提取视频 ID；非 YouTube 或格式不符返回 None。"""
+    m = YOUTUBE_ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+def collect_allowed_video_ids(r1_items, r2_results):
+    """只把素材中真实存在的 YouTube 视频 ID 设为允许值。"""
+    ids = set()
+    urls = [x.get("url", "") for x in r1_items]
+    for group in r2_results:
+        urls.extend(r.get("url", "") for r in group.get("results", []))
+    for u in urls:
+        vid = video_id(u)
+        if vid:
+            ids.add(vid)
+    return ids
+
+def sanitize_report_videos(report, allowed_ids):
+    """把报告中所有不在素材里的 YouTube 链接替换为暂无视频。"""
+    def fix(m):
+        vid = video_id(m.group(2))
+        if vid in allowed_ids:
+            return m.group(0)
+        return "暂无相关视频报道"
+    pattern = re.compile(r"\[([^\]]*)\]\((https://www\.youtube\.com/watch\?v=[^)]+)\)")
+    return pattern.sub(fix, report)
+
 # ── DeepSeek 格式化 Prompt ─────────────────────────────────
 
 def build_prompt(r1_items, r2_results, start, end):
     all_items = r1_items
-    yt_items = compile_items(r2_results)
+    yt_items = [x for x in compile_items(r2_results) if video_id(x.get("url", ""))]
 
     news_json = json.dumps(all_items, ensure_ascii=False, indent=2)
     yt_json = json.dumps(yt_items, ensure_ascii=False, indent=2)
@@ -281,7 +310,7 @@ def build_prompt(r1_items, r2_results, start, end):
 6. 财经数据保留美元并附人民币换算（1 USD ≈ 7.2 CNY）。英文术语首次附原文。
 7. 中国大陆新闻客观中立。
 8. 视频匹配优先级：优先选择独立播客/博主深度解读（podcast/analysis/explained），其次官方发布/学术演讲，最后新闻日报（Bloomberg/CNBC）仅作兜底。每条新闻 1–2 个视频；若无合适视频写「暂无相关视频报道」。尽量为不同新闻匹配不同频道的视频，避免多条新闻都引用同一个短视频。
-9. 搜索素材中可能含有 YouTube 链接，请逐一检查并优先匹配到对应新闻。
+9. 只能使用【视频素材】中给出的真实 YouTube URL，严禁编造 example1、example2 或任何占位链接。若素材中没有与该新闻匹配的视频，必须写「暂无相关视频报道」。
 10. 不编造新闻、不重复 YouTube 链接、不确定时标注"据X报道"。只输出日报 Markdown，不要额外说明。"""
 
     user = f"""【新闻素材（Tavily，已按日期过滤）】
@@ -396,8 +425,13 @@ def main():
 
     # Format
     print("\n🤖 DeepSeek 格式化 ...")
+    allowed_video_ids = collect_allowed_video_ids(r1_items, r2)
     sys_p, usr_p = build_prompt(r1_items, r2, start, end)
     report = call_deepseek(sys_p, usr_p)
+    before = len(re.findall(r"youtube\.com/watch\?v=", report))
+    report = sanitize_report_videos(report, allowed_video_ids)
+    after = len(re.findall(r"youtube\.com/watch\?v=", report))
+    print(f"  视频链接校验：{before} → {after} 个（剔除 {before - after} 个无效链接）")
     print(f"  日报 {len(report)} 字符")
 
     # Email
