@@ -3,7 +3,7 @@ name: Daily Tech News Report
 on:
   schedule:
     # 北京时间 9:55 = UTC 1:55 每天
-    - cron: '15 1 * * 1-5'  # 周一~周五 9:15 北京时间
+    - cron: '0 22 * * 0-4'  # 周一~周五 6:00 北京时间
   workflow_dispatch:
 
 jobs:
